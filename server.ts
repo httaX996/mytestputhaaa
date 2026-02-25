@@ -60,29 +60,44 @@ async function startServer() {
       
       // Ensure it starts with http
       const finalUrl = fullUrl.startsWith("http") ? fullUrl : `http://${fullUrl}`;
+      
+      let urlObj;
+      try {
+        urlObj = new URL(finalUrl);
+      } catch (e) {
+        return res.status(400).send("Invalid URL");
+      }
+
+      const domain = urlObj.host;
+      const origin = `${urlObj.protocol}//${domain}`;
 
       const response = await axios({
         method: "get",
         url: finalUrl,
         responseType: "stream",
-        timeout: 10000,
+        timeout: 20000,
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
           "Accept": "*/*",
           "Accept-Language": "en-US,en;q=0.9",
-          "Origin": "http://103.175.73.12:8080",
-          "Referer": "http://103.175.73.12:8080/",
+          "Connection": "keep-alive",
           "Icy-MetaData": "1"
         },
-        validateStatus: () => true, // Don't throw on 4xx/5xx
+        validateStatus: () => true,
       });
+
+      if (response.status >= 400) {
+        console.error(`Proxy Error: ${response.status} for ${finalUrl}`);
+        // If 404, maybe the URL is slightly different or needs a different protocol
+        res.status(response.status).send(`Source returned ${response.status}`);
+        return;
+      }
 
       // Forward headers
       const contentType = response.headers["content-type"];
       if (contentType) res.set("Content-Type", contentType);
       
-      // Force content type for m3u8 if missing or generic
-      if (finalUrl.includes(".m3u8") && (!contentType || contentType.includes("text/plain") || contentType.includes("application/octet-stream"))) {
+      if (finalUrl.includes(".m3u8") && (!contentType || !contentType.includes("mpegurl"))) {
         res.set("Content-Type", "application/vnd.apple.mpegurl");
       }
 
@@ -95,21 +110,23 @@ async function startServer() {
           content += chunk.toString();
         });
         response.data.on("end", () => {
-          // Rewrite absolute URLs to go through our proxy
-          // This handles cases where the m3u8 points to other domains
-          const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf("/") + 1);
-          
-          let rewrittenContent = content.replace(/^(https?:\/\/[^\s]+)$/gm, (match) => {
+          // Comprehensive rewriting for m3u8
+          // 1. Absolute URLs
+          let rewritten = content.replace(/(https?:\/\/[^\s"']+)/g, (match) => {
             return `/proxy/${match.replace(/^https?:\/\//, "")}`;
           });
 
-          // Also handle relative paths if they don't start with /
-          // (Though browsers usually handle these relative to the m3u8 URL, 
-          // but since we are at /proxy/..., they might get confused)
-          // Actually, if we leave relative paths alone, the browser will fetch them relative to /proxy/domain/path/
-          // which is exactly what we want.
+          // 2. Absolute paths (starting with /)
+          // We need to be careful not to match // or tags
+          rewritten = rewritten.split("\n").map(line => {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+              return `/proxy/${domain}${trimmed}`;
+            }
+            return line;
+          }).join("\n");
 
-          res.send(rewrittenContent);
+          res.send(rewritten);
         });
       } else {
         response.data.pipe(res);
