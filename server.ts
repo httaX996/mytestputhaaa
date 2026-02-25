@@ -65,20 +65,64 @@ async function startServer() {
         method: "get",
         url: finalUrl,
         responseType: "stream",
+        timeout: 10000,
         headers: {
-          "User-Agent": "Mozilla/5.0",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+          "Accept": "*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Origin": "http://103.175.73.12:8080",
           "Referer": "http://103.175.73.12:8080/",
+          "Icy-MetaData": "1"
         },
+        validateStatus: () => true, // Don't throw on 4xx/5xx
       });
 
       // Forward headers
-      res.set("Content-Type", response.headers["content-type"]);
-      res.set("Access-Control-Allow-Origin", "*");
+      const contentType = response.headers["content-type"];
+      if (contentType) res.set("Content-Type", contentType);
       
-      response.data.pipe(res);
+      // Force content type for m3u8 if missing or generic
+      if (finalUrl.includes(".m3u8") && (!contentType || contentType.includes("text/plain") || contentType.includes("application/octet-stream"))) {
+        res.set("Content-Type", "application/vnd.apple.mpegurl");
+      }
+
+      res.set("Access-Control-Allow-Origin", "*");
+      res.set("Cache-Control", "no-cache");
+      
+      if (finalUrl.includes(".m3u8")) {
+        let content = "";
+        response.data.on("data", (chunk: any) => {
+          content += chunk.toString();
+        });
+        response.data.on("end", () => {
+          // Rewrite absolute URLs to go through our proxy
+          // This handles cases where the m3u8 points to other domains
+          const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf("/") + 1);
+          
+          let rewrittenContent = content.replace(/^(https?:\/\/[^\s]+)$/gm, (match) => {
+            return `/proxy/${match.replace(/^https?:\/\//, "")}`;
+          });
+
+          // Also handle relative paths if they don't start with /
+          // (Though browsers usually handle these relative to the m3u8 URL, 
+          // but since we are at /proxy/..., they might get confused)
+          // Actually, if we leave relative paths alone, the browser will fetch them relative to /proxy/domain/path/
+          // which is exactly what we want.
+
+          res.send(rewrittenContent);
+        });
+      } else {
+        response.data.pipe(res);
+      }
+
+      response.data.on("error", (err: any) => {
+        console.error("Stream pipe error:", err.message);
+        if (!res.headersSent) res.status(500).send("Stream error");
+      });
+
     } catch (error: any) {
       console.error("Proxy error:", error.message);
-      res.status(500).send("Proxy error: " + error.message);
+      if (!res.headersSent) res.status(500).send("Proxy error: " + error.message);
     }
   });
 

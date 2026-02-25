@@ -29,15 +29,19 @@ export default function VideoPlayer({ src, title }: VideoPlayerProps) {
         hls = new Hls({
           enableWorker: true,
           lowLatencyMode: true,
-          // Handle relative paths in m3u8 by providing a custom loader or base URL
-          // But since we use a path-based proxy, relative paths should work automatically
+          backBufferLength: 90,
+          manifestLoadingMaxRetry: 10,
+          manifestLoadingRetryDelay: 1000,
+          levelLoadingMaxRetry: 10,
+          levelLoadingRetryDelay: 1000,
+          fragLoadingMaxRetry: 10,
+          fragLoadingRetryDelay: 1000,
         });
         hls.loadSource(proxyUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(() => {
-            // Autoplay might be blocked, show play button or handle silently
-            console.log("Autoplay blocked");
+          video.play().catch((e) => {
+            console.log("Autoplay blocked or failed:", e);
           });
           setIsBuffering(false);
         });
@@ -45,15 +49,20 @@ export default function VideoPlayer({ src, title }: VideoPlayerProps) {
           if (data.fatal) {
             switch (data.type) {
               case Hls.ErrorTypes.NETWORK_ERROR:
-                setError("Network error: Check your connection or the stream URL.");
-                hls?.startLoad();
+                console.error("HLS Network Error:", data);
+                if (data.response?.code === 404 || data.response?.code === 403) {
+                  setError(`Stream source returned ${data.response.code}. The channel might be offline.`);
+                } else {
+                  hls?.startLoad();
+                }
                 break;
               case Hls.ErrorTypes.MEDIA_ERROR:
-                setError("Media error: Trying to recover...");
+                console.error("HLS Media Error:", data);
                 hls?.recoverMediaError();
                 break;
               default:
-                setError("An unrecoverable error occurred.");
+                console.error("HLS Unrecoverable Error:", data);
+                setError("An unrecoverable playback error occurred.");
                 hls?.destroy();
                 break;
             }
